@@ -16,3 +16,4 @@ argon2-cffi==23.1.0
 google-auth==2.62.0
 pyasn1==0.4.8
 pyasn1-modules==0.4.1
+requests
