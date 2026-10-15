@@ -94,6 +94,7 @@ def request_verification_token(db: Session, user: User) -> str:
     token = generate_email_token()
     token_hash = hash_token_value(token)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
     db.add(
         UserVerificationToken(
             user_id=user.id,
@@ -102,9 +103,22 @@ def request_verification_token(db: Session, user: User) -> str:
         )
     )
     db.commit()
-    send_email("Verify your email", user.email, "Verification email queued")
+
+    email_body = (
+        "Hello,\n\n"
+        "Use the following token to verify your email address:\n\n"
+        f"{token}\n\n"
+        "Submit it to POST /auth/verify-email using JSON:\n"
+        '{"token": "YOUR_VERIFICATION_TOKEN"}\n\n'
+        "This token expires in 1 hour. "
+        "If you did not create this account, ignore this email."
+    )
+
+    send_email("Verify your email", user.email, email_body)
+
     if settings.app_env == "test":
         return token
+
     return "Verification email sent."
 
 
@@ -127,10 +141,13 @@ def verify_email_token(db: Session, token: str) -> User:
 
 
 def request_password_reset(db: Session, email: str) -> str:
-    user = _get_user_by_email(db, email.lower())
+    user = _get_user_by_email(db, email.lower().strip())
+
     if user is None:
         return "If that account exists, a password reset link has been sent."
+
     token = generate_email_token()
+
     db.add(
         PasswordResetToken(
             user_id=user.id,
@@ -139,11 +156,25 @@ def request_password_reset(db: Session, email: str) -> str:
         )
     )
     db.commit()
-    send_email("Password reset", user.email, "Password reset email queued")
+
+    email_body = (
+        "Hello,\n\n"
+        "Use the following token to reset your password:\n\n"
+        f"{token}\n\n"
+        "Submit it to POST /auth/reset-password using JSON with "
+        "the token and your new password:\n"
+        '{"token": "YOUR_RESET_TOKEN", '
+        '"new_password": "YOUR_NEW_PASSWORD"}\n\n'
+        "This token expires in 15 minutes and can only be used once. "
+        "If you did not request a password reset, ignore this email."
+    )
+
+    send_email("Password reset", user.email, email_body)
+
     if settings.app_env == "test":
         return token
-    return "If that account exists, a password reset link has been sent."
 
+    return "If that account exists, a password reset link has been sent."
 
 def reset_password(db: Session, token: str, new_password: str) -> User:
     token_hash = hash_token_value(token)
@@ -162,11 +193,18 @@ def reset_password(db: Session, token: str, new_password: str) -> User:
 
 
 def request_otp(db: Session, email: str) -> str:
-    user = _get_user_by_email(db, email.lower())
+    user = _get_user_by_email(db, email.lower().strip())
+
     if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
     rate_limit(f"otp:{email}", settings.otp_rate_limit_per_minute)
+
     code = generate_otp_code()
+
     challenge = OTPChallenge(
         user_id=user.id,
         email=user.email,
@@ -174,11 +212,22 @@ def request_otp(db: Session, email: str) -> str:
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         attempts=0,
     )
+
     db.add(challenge)
     db.commit()
-    send_email("OTP code", user.email, "OTP code queued")
+
+    email_body = (
+        "Hello,\n\n"
+        f"Your one-time password (OTP) is: {code}\n\n"
+        "This OTP expires in 5 minutes. "
+        "Do not share it with anyone."
+    )
+
+    send_email("Your OTP code", user.email, email_body)
+
     if settings.app_env == "test":
         return code
+
     return "OTP sent."
 
 
