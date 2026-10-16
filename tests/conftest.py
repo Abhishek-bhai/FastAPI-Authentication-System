@@ -2,6 +2,7 @@ import os
 import tempfile
 
 os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("SECRET_KEY", "test-only-secret-key-for-isolated-tests-1234567890")
 
 import pytest
 from fastapi.testclient import TestClient

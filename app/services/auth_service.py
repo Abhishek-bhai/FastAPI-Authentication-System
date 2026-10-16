@@ -231,7 +231,7 @@ def request_otp(db: Session, email: str) -> str:
 def verify_otp(db: Session, email: str, code: str) -> dict[str, str]:
     user = _get_user_by_email(db, email.lower())
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
     challenge = (
         db.query(OTPChallenge)
         .filter(OTPChallenge.user_id == user.id)
@@ -239,18 +239,18 @@ def verify_otp(db: Session, email: str, code: str) -> dict[str, str]:
         .first()
     )
     if not challenge:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No OTP challenge found")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
     if challenge.verified_at is not None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP already used")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
     expires_at = _ensure_utc(challenge.expires_at)
     if expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP expired")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
     if challenge.attempts >= 5:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP attempts exceeded")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
     if hash_token_value(code) != challenge.code_hash:
         challenge.attempts += 1
         db.commit()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OTP code")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
     challenge.verified_at = datetime.now(timezone.utc)
     user.is_verified = True
     db.commit()
@@ -324,6 +324,11 @@ def logout_user(db: Session, user: User, refresh_token_value: str | None, access
         refresh_hash = hash_token_value(refresh_token_value)
         refresh_record = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == refresh_hash))
         if refresh_record:
+            if refresh_record.user_id != user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Refresh token does not belong to the authenticated user",
+                )
             refresh_record.revoked_at = datetime.now(timezone.utc)
             revoke_family_tokens(db, user.id, refresh_record.family_id)
     if access_token_value:

@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_active_user, get_current_user
@@ -88,6 +89,16 @@ def register_user(payload: UserCreate, request: Request, db: Session = Depends(g
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
     rate_limit(f"login:{request.client.host if request.client else 'unknown'}", settings.rate_limit_per_minute)
     return auth_service.login_user(db, payload.email, payload.password)
+
+
+@router.post("/token", response_model=TokenPair)
+def issue_oauth2_token(
+    request: Request,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    rate_limit(f"login:{request.client.host if request.client else 'unknown'}", settings.rate_limit_per_minute)
+    return auth_service.login_user(db, form_data.username, form_data.password)
 
 
 @router.post("/refresh", response_model=TokenPair)

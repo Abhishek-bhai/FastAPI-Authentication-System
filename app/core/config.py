@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     debug: bool = True
     database_url: str = "sqlite:///./app.db"
-    secret_key: str = "dev-secret-key-change-me"
+    secret_key: str
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7

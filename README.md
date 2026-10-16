@@ -59,6 +59,7 @@ The application reads these environment variables from `.env` (or the process en
 | `RATE_LIMIT_PER_MINUTE`, `OTP_RATE_LIMIT_PER_MINUTE` | Request limits |
 
 Values in `.env.example` are placeholders, not working credentials. Configure real credentials only in your local `.env` or deployment secret store.
+`SECRET_KEY` is required; the application no longer falls back to a known development signing key.
 
 ## Database migrations
 
@@ -81,6 +82,8 @@ uvicorn app.main:app --reload
 - API docs: http://127.0.0.1:8000/docs
 - Health check: http://127.0.0.1:8000/health
 
+In Swagger UI, use **Authorize** with the account email as the username and its password. This uses the OAuth2 password-flow endpoint `/auth/token`; JSON clients can continue using `/auth/login`.
+
 ## Email configuration
 
 Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM` in `.env`. Port 465 uses SMTP over SSL; other configured ports use STARTTLS. Email-related endpoints return an error if SMTP delivery is not configured or fails. Tests mock SMTP and do not send real email.
@@ -102,6 +105,7 @@ For production, use HTTPS, set `APP_ENV=production`, `DEBUG=false`, a strong sec
 |---|---|---|
 | POST | `/auth/register` | Create account |
 | POST | `/auth/login` | Obtain access and refresh tokens |
+| POST | `/auth/token` | Obtain tokens using OAuth2 password form (used by Swagger Authorize) |
 | POST | `/auth/refresh` | Rotate refresh token |
 | POST | `/auth/logout` | Revoke tokens |
 | GET | `/auth/me` | Current authenticated profile |
@@ -123,3 +127,19 @@ pip check
 ```
 
 The tests use temporary SQLite databases and mock email delivery; they do not need live SMTP or OAuth provider credentials.
+
+## API smoke test
+
+Start the API, then run the smoke test with an existing account. It prompts for the password without echoing it, keeps tokens in memory, and checks login, protected endpoints, logout, and both token revocation paths:
+
+```bash
+python scripts/api_smoke_test.py --email user@example.com
+```
+
+To test against another local API URL:
+
+```bash
+python scripts/api_smoke_test.py --base-url http://127.0.0.1:8000 --email user@example.com
+```
+
+The smoke test logs out that account and revokes the session used for the test. Do not use an account whose session you need to keep active.
