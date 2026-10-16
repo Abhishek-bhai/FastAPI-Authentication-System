@@ -86,18 +86,34 @@ In Swagger UI, use **Authorize** with the account email as the username and its 
 
 ## Email configuration
 
-Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM` in `.env`. Port 465 uses SMTP over SSL; other configured ports use STARTTLS. Email-related endpoints return an error if SMTP delivery is not configured or fails. Tests mock SMTP and do not send real email.
+Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM` in `.env`. Port 465 uses SMTP over SSL; other configured ports use STARTTLS. Verification-email delivery reports a service error when delivery fails. Password-reset and OTP requests intentionally return generic responses to avoid revealing whether an email belongs to an account; delivery failures are logged without including tokens, codes, or recipient addresses. Tests mock SMTP and do not send real email.
 
 ## OAuth setup
 
-Create OAuth applications in the Google Cloud Console and GitHub Developer settings. Configure each client ID, client secret and exact callback URL in `.env`:
+OAuth login requires real provider credentials; the placeholder values in `.env.example` are deliberately rejected. Configure the provider callback URI exactly the same way in your provider dashboard and `.env`. The hostname used when starting OAuth, receiving the callback, and in the callback URI must be consistent (for example, use `localhost` throughout rather than mixing it with `127.0.0.1`).
 
-- Google callback: `http://localhost:8000/auth/google/callback`
-- GitHub callback: `http://localhost:8000/auth/github/callback`
+### Google
 
-The frontend/client must call `/auth/google/login` or `/auth/github/login` using a browser that retains cookies, then navigate to the returned `authorization_url`. The callback checks the returned state against a signed, short-lived HttpOnly cookie. OAuth is unavailable until real credentials are supplied.
+1. In Google Cloud Console, create or select a project and configure the OAuth consent screen for your application.
+2. Create an OAuth client ID of type **Web application**.
+3. Add the exact callback URL `http://localhost:8000/auth/google/callback` as an authorized redirect URI for local development. For deployment, register the HTTPS callback URL instead.
+4. Put the generated client ID and client secret in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`; set `GOOGLE_REDIRECT_URI` to the same exact callback URI.
+5. Start the API, request `http://localhost:8000/auth/google/login` from the browser/client, and navigate to the `authorization_url` in its JSON response. The browser must retain the API's OAuth state cookie and return to the same API hostname.
+6. The callback exchanges the authorization code and verifies Google's ID token signature, audience, expiry, and verified email before creating or linking the account.
 
-For production, use HTTPS, set `APP_ENV=production`, `DEBUG=false`, a strong secret, real SMTP credentials and real OAuth credentials. Restrict CORS origins to trusted frontend origins.
+The Google flow requests `openid email profile`. Ensure your consent-screen configuration and any testing-user restrictions allow the account you use to sign in.
+
+### GitHub
+
+1. Create an OAuth App in GitHub Developer Settings.
+2. Set its **Authorization callback URL** to `http://localhost:8000/auth/github/callback` for local development. For deployment, use the exact HTTPS callback URL.
+3. Put the client ID and client secret in `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`; set `GITHUB_REDIRECT_URI` to the same exact callback URI.
+4. Start the API, request `http://localhost:8000/auth/github/login`, and navigate to the returned `authorization_url` in a browser that retains the OAuth state cookie.
+5. The callback exchanges the authorization code and requires a verified primary GitHub email.
+
+Both callbacks validate the returned state against a signed, short-lived HttpOnly cookie before contacting the provider. A local test with placeholder credentials should return HTTP 400 with an OAuth-not-configured error; that is expected and does not indicate a callback defect. Automated tests cover placeholder rejection and state mismatch without calling external providers. Successful Google/GitHub login still requires manual testing with valid provider credentials, correct dashboard callback URLs, and browser cookie retention.
+
+For production, use HTTPS, set `APP_ENV=production`, `DEBUG=false`, a strong secret, real SMTP credentials and real OAuth credentials. Restrict CORS origins to trusted frontend origins. Current production configuration requires both Google and GitHub credentials; change that policy before deploying if your service intentionally supports only one provider.
 
 ## Main endpoints
 
@@ -143,3 +159,10 @@ python scripts/api_smoke_test.py --base-url http://127.0.0.1:8000 --email user@e
 ```
 
 The smoke test logs out that account and revokes the session used for the test. Do not use an account whose session you need to keep active.
+
+## Known limitations and manual verification
+
+- Automated tests use temporary SQLite databases and mock email sending; they do not prove delivery through a real SMTP server.
+- Google and GitHub authorization-code exchanges require provider credentials and matching callback configuration. They have not been tested end-to-end against live providers.
+- The built-in rate limiter is in-memory and is not shared between multiple worker processes.
+- Verify the email verification, password-reset, OTP, and social login flows manually in a configured local environment before relying on external delivery/provider behavior.

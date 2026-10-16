@@ -53,17 +53,6 @@ def _validate_oauth_state(provider: str, state: str | None, cookie_value: str | 
         raise HTTPException(status_code=400, detail="OAuth state mismatch")
 
 
-def _oauth_credentials_ready(provider: str) -> bool:
-    client_id = getattr(settings, f"{provider}_client_id")
-    client_secret = getattr(settings, f"{provider}_client_secret")
-    placeholders = {
-        "google": {"google-client-id", "your-google-client-id"},
-        "github": {"github-client-id", "your-github-client-id"},
-    }
-    return bool(client_id and client_secret and client_id not in placeholders[provider]
-                and client_secret not in {f"{provider}-client-secret", f"your-{provider}-client-secret"})
-
-
 def _set_oauth_cookie(response: Response, provider: str, value: str) -> None:
     response.set_cookie(
         key=f"oauth_state_{provider}", value=value, max_age=OAUTH_STATE_TTL_SECONDS,
@@ -171,7 +160,7 @@ def verify_otp(payload: OTPVerifyRequest, request: Request, db: Session = Depend
 
 @router.get("/google/login")
 def google_login(response: Response) -> dict[str, str]:
-    if not _oauth_credentials_ready("google"):
+    if not oauth_service.credentials_ready("google"):
         raise HTTPException(status_code=400, detail="Google OAuth is not configured")
     state, cookie = _new_oauth_state("google")
     _set_oauth_cookie(response, "google", cookie)
@@ -199,7 +188,7 @@ async def google_callback(request: Request, response: Response, code: str | None
 
 @router.get("/github/login")
 def github_login(response: Response) -> dict[str, str]:
-    if not _oauth_credentials_ready("github"):
+    if not oauth_service.credentials_ready("github"):
         raise HTTPException(status_code=400, detail="GitHub OAuth is not configured")
     state, cookie = _new_oauth_state("github")
     _set_oauth_cookie(response, "github", cookie)

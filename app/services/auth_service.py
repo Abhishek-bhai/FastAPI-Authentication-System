@@ -1,3 +1,5 @@
+import hmac
+import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -22,7 +24,9 @@ from app.core.security import (
     verify_password,
 )
 from app.models.user import OTPChallenge, OAuthIdentity, PasswordResetToken, RefreshToken, RevokedToken, User, UserVerificationToken
-from app.services.email_service import send_email
+from app.services.email_service import EmailDeliveryError, send_email
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_utc(value: datetime | None) -> datetime | None:
@@ -35,6 +39,13 @@ def _ensure_utc(value: datetime | None) -> datetime | None:
 
 def _get_user_by_email(db: Session, email: str) -> User | None:
     return db.scalar(select(User).where(User.email == email.lower()))
+
+
+def _send_enumeration_safe_email(subject: str, recipient: str, body: str) -> None:
+    try:
+        send_email(subject, recipient, body)
+    except EmailDeliveryError:
+        logger.warning("Authentication email delivery failed for message type %s", subject)
 
 
 def _create_token_pair(db: Session, user: User) -> tuple[str, str]:
@@ -169,7 +180,7 @@ def request_password_reset(db: Session, email: str) -> str:
         "If you did not request a password reset, ignore this email."
     )
 
-    send_email("Password reset", user.email, email_body)
+    _send_enumeration_safe_email("Password reset", user.email, email_body)
 
     if settings.app_env == "test":
         return token
@@ -220,7 +231,7 @@ def request_otp(db: Session, email: str) -> str:
         "Do not share it with anyone."
     )
 
-    send_email("Your OTP code", user.email, email_body)
+    _send_enumeration_safe_email("Your OTP code", user.email, email_body)
 
     if settings.app_env == "test":
         return code
@@ -247,10 +258,12 @@ def verify_otp(db: Session, email: str, code: str) -> dict[str, str]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
     if challenge.attempts >= 5:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
-    if hash_token_value(code) != challenge.code_hash:
+    if not hmac.compare_digest(hash_token_value(code), challenge.code_hash):
         challenge.attempts += 1
         db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
     challenge.verified_at = datetime.now(timezone.utc)
     user.is_verified = True
     db.commit()
@@ -262,20 +275,22 @@ def get_authenticated_user(db: Session, token: str) -> User:
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token type is invalid")
-    user_id = int(payload.get("sub"))
+    try:
+        user_id = int(payload["sub"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject") from exc
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    if payload.get("jti"):
-        revoked = db.scalar(
-            select(RevokedToken).where(
-                RevokedToken.user_id == user.id,
-                RevokedToken.token_type == "access",
-                RevokedToken.token_jti == payload["jti"],
-            )
+    revoked = db.scalar(
+        select(RevokedToken).where(
+            RevokedToken.user_id == user.id,
+            RevokedToken.token_type == "access",
+            RevokedToken.token_jti == payload["jti"],
         )
-        if revoked:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token has been revoked")
+    )
+    if revoked:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token has been revoked")
     return user
 
 
@@ -398,6 +413,8 @@ def handle_oauth_user(db: Session, provider: str, provider_user_id: str, email: 
                 db.refresh(user)
         else:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No email available for OAuth user")
+        if not user.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
         db.add(
             OAuthIdentity(
                 user_id=user.id,
@@ -407,5 +424,7 @@ def handle_oauth_user(db: Session, provider: str, provider_user_id: str, email: 
             )
         )
         db.commit()
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
     access_token, refresh_token = _create_token_pair(db, user)
     return user, {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}

@@ -60,7 +60,17 @@ def create_refresh_token(subject: str, jti: str) -> str:
 
 def decode_token(token: str) -> dict:
     try:
-        return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        return jwt.decode(
+            token,
+            settings.secret_key,
+            algorithms=[settings.algorithm],
+            options={
+                "require_exp": True,
+                "require_iat": True,
+                "require_jti": True,
+                "require_sub": True,
+            },
+        )
     except JWTError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

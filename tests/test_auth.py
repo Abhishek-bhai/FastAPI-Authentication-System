@@ -8,9 +8,10 @@ from fastapi.testclient import TestClient
 from jose import jwt
 
 from app.core.config import Settings, settings
-from app.core.security import verify_password
-from app.models.user import OTPChallenge, PasswordResetToken, User
+from app.core.security import create_access_token, verify_password
+from app.models.user import OAuthIdentity, OTPChallenge, PasswordResetToken, User
 from app.services import auth_service
+from app.services.email_service import EmailDeliveryError
 
 
 def test_secret_key_must_be_configured(monkeypatch):
@@ -85,6 +86,37 @@ def test_expired_access_token_is_rejected(client: TestClient):
         algorithm=settings.algorithm,
     )
     response = client.get("/auth/me", headers={"Authorization": f"Bearer {expired_token}"})
+    assert response.status_code == 401
+
+
+def test_access_token_missing_jti_is_rejected(client: TestClient):
+    token = jwt.encode(
+        {
+            "sub": "1",
+            "type": "access",
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=1),
+            "iat": datetime.now(timezone.utc),
+        },
+        settings.secret_key,
+        algorithm=settings.algorithm,
+    )
+    response = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+
+
+def test_access_token_without_expiry_is_rejected(client: TestClient):
+    token_without_expiry = jwt.encode(
+        {"sub": "1", "type": "access", "jti": "missing-expiry"},
+        settings.secret_key,
+        algorithm=settings.algorithm,
+    )
+    response = client.get("/auth/me", headers={"Authorization": f"Bearer {token_without_expiry}"})
+    assert response.status_code == 401
+
+
+def test_access_token_with_non_numeric_subject_returns_unauthorized(client: TestClient):
+    token = create_access_token("not-a-user-id", "invalid-subject")
+    response = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
 
 
@@ -255,6 +287,55 @@ def test_otp_attempt_limit_blocks_later_correct_code(client: TestClient, monkeyp
     db.close()
 
 
+def test_otp_login_rejects_inactive_user(client: TestClient, monkeypatch):
+    client.post("/auth/register", json={"email": "disabled-otp@example.com", "username": "disabled-otp", "password": "strongpass123"})
+    monkeypatch.setattr(auth_service, "generate_otp_code", lambda: "123456")
+    from app.database.session import SessionLocal
+
+    db = SessionLocal()
+    user = db.query(User).filter_by(email="disabled-otp@example.com").first()
+    auth_service.request_otp(db, user.email)
+    user.is_active = False
+    db.commit()
+
+    with pytest.raises(HTTPException) as inactive:
+        auth_service.verify_otp(db, user.email, "123456")
+    assert inactive.value.status_code == 403
+    db.close()
+
+
+def test_oauth_login_rejects_inactive_linked_user(client: TestClient):
+    client.post("/auth/register", json={"email": "disabled-oauth@example.com", "username": "disabled-oauth", "password": "strongpass123"})
+    from app.database.session import SessionLocal
+
+    db = SessionLocal()
+    user = db.query(User).filter_by(email="disabled-oauth@example.com").first()
+    user.is_active = False
+    db.commit()
+
+    with pytest.raises(HTTPException) as inactive:
+        auth_service.handle_oauth_user(db, "google", "provider-user-123", user.email)
+    assert inactive.value.status_code == 403
+    assert db.query(OAuthIdentity).filter_by(user_id=user.id).count() == 0
+    db.close()
+
+
+def test_oauth_login_rejects_existing_link_for_inactive_user(client: TestClient):
+    client.post("/auth/register", json={"email": "disabled-linked@example.com", "username": "disabled-linked", "password": "strongpass123"})
+    from app.database.session import SessionLocal
+
+    db = SessionLocal()
+    user = db.query(User).filter_by(email="disabled-linked@example.com").first()
+    db.add(OAuthIdentity(user_id=user.id, provider="google", provider_user_id="linked-disabled-user"))
+    user.is_active = False
+    db.commit()
+
+    with pytest.raises(HTTPException) as inactive:
+        auth_service.handle_oauth_user(db, "google", "linked-disabled-user", user.email)
+    assert inactive.value.status_code == 403
+    db.close()
+
+
 def test_otp_request_does_not_disclose_unknown_email(client: TestClient):
     response = client.post("/auth/otp/request", json={"email": "unknown@example.com"})
     assert response.status_code == 200
@@ -275,6 +356,36 @@ def test_otp_verification_does_not_disclose_account_existence(client: TestClient
     assert unknown.json() == no_challenge.json() == {"detail": "Invalid or expired OTP"}
 
 
+def test_reset_request_response_is_generic_when_smtp_fails(client: TestClient, monkeypatch):
+    client.post("/auth/register", json={"email": "reset-mail@example.com", "username": "reset-mail", "password": "strongpass123"})
+    monkeypatch.setattr(
+        auth_service,
+        "send_email",
+        lambda *args, **kwargs: (_ for _ in ()).throw(EmailDeliveryError("SMTP unavailable")),
+    )
+
+    known = client.post("/auth/request-password-reset", json={"email": "reset-mail@example.com"})
+    unknown = client.post("/auth/request-password-reset", json={"email": "unknown-reset@example.com"})
+    assert known.status_code == unknown.status_code == 200
+    assert known.json() == unknown.json() == {
+        "message": "If that account exists, a password reset link has been sent."
+    }
+
+
+def test_otp_request_response_is_generic_when_smtp_fails(client: TestClient, monkeypatch):
+    client.post("/auth/register", json={"email": "otp-mail@example.com", "username": "otp-mail", "password": "strongpass123"})
+    monkeypatch.setattr(
+        auth_service,
+        "send_email",
+        lambda *args, **kwargs: (_ for _ in ()).throw(EmailDeliveryError("SMTP unavailable")),
+    )
+
+    known = client.post("/auth/otp/request", json={"email": "otp-mail@example.com"})
+    unknown = client.post("/auth/otp/request", json={"email": "unknown-otp@example.com"})
+    assert known.status_code == unknown.status_code == 200
+    assert known.json() == unknown.json() == {"message": "OTP sent."}
+
+
 def test_oauth_state_validation(client: TestClient):
     bad = client.get("/auth/google/callback", params={"code": "abc"})
     assert bad.status_code == 400
@@ -293,6 +404,24 @@ def test_oauth_callback_rejects_state_mismatch_before_provider_request(client: T
     )
     assert callback.status_code == 400
     assert callback.json() == {"detail": "OAuth state mismatch"}
+
+
+@pytest.mark.parametrize(
+    ("provider", "client_id", "client_secret"),
+    [
+        ("google", "your-google-client-id", "replace-with-your-google-client-secret"),
+        ("google", "configured-client-id", "replace-with-your-google-client-secret"),
+        ("github", "your-github-client-id", "replace-with-your-github-client-secret"),
+    ],
+)
+def test_oauth_login_rejects_placeholder_credentials(client: TestClient, monkeypatch, provider, client_id, client_secret):
+    monkeypatch.setattr(settings, f"{provider}_client_id", client_id)
+    monkeypatch.setattr(settings, f"{provider}_client_secret", client_secret)
+
+    response = client.get(f"/auth/{provider}/login")
+    assert response.status_code == 400
+    provider_name = {"google": "Google", "github": "GitHub"}[provider]
+    assert response.json() == {"detail": f"{provider_name} OAuth is not configured"}
 
 
 def test_unauthorized_access_to_another_user(client: TestClient):

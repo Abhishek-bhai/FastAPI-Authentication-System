@@ -8,8 +8,40 @@ from google.oauth2 import id_token
 from app.core.config import settings
 
 
+def credentials_ready(provider: str) -> bool:
+    if provider not in {"google", "github"}:
+        raise ValueError(f"Unsupported OAuth provider: {provider}")
+
+    client_id = getattr(settings, f"{provider}_client_id", "").strip()
+    client_secret = getattr(settings, f"{provider}_client_secret", "").strip()
+    placeholders = {
+        "google": {
+            "client_ids": {"google-client-id", "your-google-client-id"},
+            "client_secrets": {
+                "google-client-secret",
+                "your-google-client-secret",
+                "replace-with-your-google-client-secret",
+            },
+        },
+        "github": {
+            "client_ids": {"github-client-id", "your-github-client-id"},
+            "client_secrets": {
+                "github-client-secret",
+                "your-github-client-secret",
+                "replace-with-your-github-client-secret",
+            },
+        },
+    }[provider]
+    return bool(
+        client_id
+        and client_secret
+        and client_id.lower() not in placeholders["client_ids"]
+        and client_secret.lower() not in placeholders["client_secrets"]
+    )
+
+
 async def get_google_user(code: str, state: str | None = None) -> dict[str, Any]:
-    if not settings.google_client_id or settings.google_client_id in {"google-client-id", "your-google-client-id"}:
+    if not credentials_ready("google"):
         raise HTTPException(status_code=400, detail="Google OAuth is not configured")
     if not state:
         raise HTTPException(status_code=400, detail="Missing OAuth state")
@@ -48,7 +80,7 @@ async def get_google_user(code: str, state: str | None = None) -> dict[str, Any]
 
 
 async def get_github_user(code: str, state: str | None = None) -> dict[str, Any]:
-    if not settings.github_client_id or settings.github_client_id in {"github-client-id", "your-github-client-id"}:
+    if not credentials_ready("github"):
         raise HTTPException(status_code=400, detail="GitHub OAuth is not configured")
     if not state:
         raise HTTPException(status_code=400, detail="Missing OAuth state")
