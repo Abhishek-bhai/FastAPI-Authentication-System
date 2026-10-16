@@ -1,0 +1,14 @@
+services:
+  api:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite:////data/app.db
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - auth_data:/data
+
+volumes:
+  auth_data:

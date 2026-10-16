@@ -87,6 +87,20 @@ uvicorn app.main:app --reload
 
 In Swagger UI, use **Authorize** with the account email as the username and its password. This uses the OAuth2 password-flow endpoint `/auth/token`; JSON clients can continue using `/auth/login`.
 
+## Docker
+
+Docker Compose runs the API as a non-root user, binds port 8000 to localhost, and stores SQLite data in a named volume. The project `.env` file is supplied to the container at runtime and excluded from the image build context.
+
+```bash
+if [ ! -f .env ]; then cp .env.example .env; fi
+# Edit .env and set SECRET_KEY to a strong, unique value.
+docker compose build
+docker compose run --rm api alembic upgrade head
+docker compose up
+```
+
+Open `http://127.0.0.1:8000/docs` for interactive API testing. Stop the service with `docker compose down`; the `auth_data` volume is retained. To remove that volume and its database, use `docker compose down --volumes` only when you intend to delete the persisted data.
+
 ## Email configuration
 
 Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM` in `.env`. Port 465 uses SMTP over SSL; other configured ports use STARTTLS. Registration reports a service error if the initial verification email cannot be delivered. Verification-email resend, password-reset, and OTP requests use generic responses to avoid revealing whether an email belongs to an account; delivery failures are logged without including tokens, codes, or recipient addresses. Tests mock SMTP and do not send real email.

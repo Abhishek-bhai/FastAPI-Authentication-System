@@ -43,6 +43,10 @@ class Settings(BaseSettings):
         if self.debug:
             raise ValueError("DEBUG must be false in production.")
 
+        cors_origins = {origin.strip() for origin in self.cors_origins.split(",")}
+        if "*" in cors_origins:
+            raise ValueError("CORS_ORIGINS must contain explicit trusted origins in production.")
+
         insecure_secret_values = {
             "",
             "dev-secret-key-change-me",

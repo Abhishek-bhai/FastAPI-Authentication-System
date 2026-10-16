@@ -20,6 +20,46 @@ def test_secret_key_must_be_configured(monkeypatch):
         Settings(_env_file=None)
 
 
+def test_production_cors_rejects_wildcard_origins():
+    production_settings = {
+        "app_env": "production",
+        "debug": False,
+        "secret_key": "x" * 48,
+        "smtp_host": "smtp.example.org",
+        "smtp_username": "sender@example.org",
+        "smtp_password": "test-placeholder",
+        "smtp_from": "sender@example.org",
+        "google_client_id": "configured-google-client",
+        "google_client_secret": "configured-google-secret",
+        "github_client_id": "configured-github-client",
+        "github_client_secret": "configured-github-secret",
+        "cors_origins": "https://app.example.org, *",
+    }
+
+    with pytest.raises(ValidationError, match="CORS_ORIGINS"):
+        Settings(_env_file=None, **production_settings)
+
+
+def test_production_cors_accepts_explicit_origins():
+    production_settings = {
+        "app_env": "production",
+        "debug": False,
+        "secret_key": "x" * 48,
+        "smtp_host": "smtp.example.org",
+        "smtp_username": "sender@example.org",
+        "smtp_password": "test-placeholder",
+        "smtp_from": "sender@example.org",
+        "google_client_id": "configured-google-client",
+        "google_client_secret": "configured-google-secret",
+        "github_client_id": "configured-github-client",
+        "github_client_secret": "configured-github-secret",
+        "cors_origins": "https://app.example.org,https://admin.example.org",
+    }
+
+    config = Settings(_env_file=None, **production_settings)
+    assert config.cors_origins == production_settings["cors_origins"]
+
+
 def test_registration_and_login(client: TestClient):
     response = client.post(
         "/auth/register",
@@ -384,8 +424,30 @@ def test_otp_flow(client: TestClient):
     db.close()
     verify = client.post("/auth/otp/verify", json={"email": "henry@example.com", "code": code})
     assert verify.status_code == 200, verify.text
+    tokens = verify.json()
+    assert tokens["access_token"]
+    assert tokens["refresh_token"]
+    profile = client.get(
+        "/auth/me",
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    assert profile.status_code == 200, profile.text
     replay = client.post("/auth/otp/verify", json={"email": "henry@example.com", "code": code})
     assert replay.status_code == 401
+
+
+def test_otp_request_is_rate_limited(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "otp_rate_limit_per_minute", 1)
+    client.post(
+        "/auth/register",
+        json={"email": "otp-rate-limit@example.com", "username": "otp-rate-limit", "password": "strongpass123"},
+    )
+
+    first = client.post("/auth/otp/request", json={"email": "otp-rate-limit@example.com"})
+    second = client.post("/auth/otp/request", json={"email": "otp-rate-limit@example.com"})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
 
 
 def test_expired_otp_is_rejected(client: TestClient):
