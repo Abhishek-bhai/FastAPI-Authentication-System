@@ -180,6 +180,32 @@ def test_access_token_without_expiry_is_rejected(client: TestClient):
     assert response.status_code == 401
 
 
+@pytest.mark.parametrize(
+    ("claim", "value"),
+    [
+        ("exp", []),
+        ("iat", []),
+    ],
+)
+def test_access_token_with_malformed_numeric_date_is_rejected(
+    client: TestClient, claim: str, value: list
+):
+    payload = {
+        "sub": "1",
+        "type": "access",
+        "jti": "malformed-numeric-date",
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=1),
+        "iat": datetime.now(timezone.utc),
+    }
+    payload[claim] = value
+    token = jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+
+    response = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid or expired token"}
+
+
 def test_access_token_with_non_numeric_subject_returns_unauthorized(client: TestClient):
     token = create_access_token("not-a-user-id", "invalid-subject")
     response = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})

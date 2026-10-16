@@ -72,7 +72,7 @@ def decode_token(token: str) -> dict:
                 "require_sub": True,
             },
         )
-    except JWTError as exc:
+    except (JWTError, TypeError, ValueError, OverflowError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
