@@ -7,7 +7,8 @@ from typing import Any
 
 from fastapi import HTTPException, status
 from jose import jwt as jose_jwt
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -51,7 +52,7 @@ def _send_enumeration_safe_email(subject: str, recipient: str, body: str) -> Non
 def _create_token_pair(db: Session, user: User) -> tuple[str, str]:
     access_jti = str(uuid.uuid4())
     refresh_jti = str(uuid.uuid4())
-    access_token = create_access_token(str(user.id), access_jti)
+    access_token = create_access_token(str(user.id), access_jti, user.token_version)
     refresh_token = create_refresh_token(str(user.id), refresh_jti)
     family_id = str(uuid.uuid4())
     refresh_hash = hash_token_value(refresh_token)
@@ -80,18 +81,34 @@ def register_user(db: Session, payload: Any) -> User:
         is_verified=False,
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if _get_user_by_email(db, email):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This email is already registered",
+            ) from exc
+        raise
     db.refresh(user)
     request_verification_token(db, user)
     return user
 
 
 def authenticate_user(db: Session, email: str, password: str) -> User:
+    if len(password) > 1024:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     user = _get_user_by_email(db, email.lower())
     if not user or not verify_password(password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
+    if not user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Please verify your email before logging in",
+        )
     return user
 
 
@@ -102,6 +119,8 @@ def login_user(db: Session, email: str, password: str) -> dict[str, str]:
 
 
 def request_verification_token(db: Session, user: User) -> str:
+    if user.is_verified:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already verified")
     token = generate_email_token()
     token_hash = hash_token_value(token)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
@@ -133,6 +152,16 @@ def request_verification_token(db: Session, user: User) -> str:
     return "Verification email sent."
 
 
+def request_verification_for_email(db: Session, email: str) -> None:
+    user = _get_user_by_email(db, email.strip())
+    if user is None or user.is_verified or not user.is_active:
+        return
+    try:
+        request_verification_token(db, user)
+    except EmailDeliveryError:
+        logger.warning("Authentication email delivery failed for message type verification")
+
+
 def verify_email_token(db: Session, token: str) -> User:
     token_hash = hash_token_value(token)
     record = db.scalar(
@@ -140,12 +169,25 @@ def verify_email_token(db: Session, token: str) -> User:
     )
     if not record:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification token")
-    expires_at = _ensure_utc(record.expires_at)
-    if record.used_at is not None or expires_at < datetime.now(timezone.utc):
+    now = datetime.now(timezone.utc)
+    claimed = db.execute(
+        update(UserVerificationToken)
+        .where(
+            UserVerificationToken.id == record.id,
+            UserVerificationToken.used_at.is_(None),
+            UserVerificationToken.expires_at > now,
+        )
+        .values(used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Verification token is expired or already used")
     user = db.get(User, record.user_id)
+    if not user:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification token")
     user.is_verified = True
-    record.used_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(user)
     return user
@@ -196,20 +238,46 @@ def reset_password(db: Session, token: str, new_password: str) -> User:
     if record.used_at is not None or expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password reset token is expired or already used")
     user = db.get(User, record.user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid password reset token")
+    now = datetime.now(timezone.utc)
+    claimed = db.execute(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.id == record.id,
+            PasswordResetToken.used_at.is_(None),
+            PasswordResetToken.expires_at > now,
+        )
+        .values(used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid password reset token")
     user.hashed_password = hash_password(new_password)
-    record.used_at = datetime.now(timezone.utc)
-    db.query(RefreshToken).filter(RefreshToken.user_id == user.id).update({"revoked_at": datetime.now(timezone.utc)})
+    user.token_version += 1
+    db.query(RefreshToken).filter(RefreshToken.user_id == user.id).update({"revoked_at": now})
+    db.execute(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+        .execution_options(synchronize_session=False)
+    )
     db.commit()
     return user
 
 
 def request_otp(db: Session, email: str) -> str:
-    user = _get_user_by_email(db, email.lower().strip())
+    normalized_email = email.lower().strip()
+    user = _get_user_by_email(db, normalized_email)
 
     if user is None:
         return "OTP sent."
 
-    rate_limit(f"otp:{email}", settings.otp_rate_limit_per_minute)
+    rate_limit(f"otp:{normalized_email}", settings.otp_rate_limit_per_minute)
 
     code = generate_otp_code()
 
@@ -258,13 +326,37 @@ def verify_otp(db: Session, email: str, code: str) -> dict[str, str]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
     if challenge.attempts >= 5:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
+    now = datetime.now(timezone.utc)
     if not hmac.compare_digest(hash_token_value(code), challenge.code_hash):
-        challenge.attempts += 1
+        db.execute(
+            update(OTPChallenge)
+            .where(
+                OTPChallenge.id == challenge.id,
+                OTPChallenge.attempts < 5,
+                OTPChallenge.verified_at.is_(None),
+                OTPChallenge.expires_at > now,
+            )
+            .values(attempts=OTPChallenge.attempts + 1)
+            .execution_options(synchronize_session=False)
+        )
         db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
-    challenge.verified_at = datetime.now(timezone.utc)
+    claimed = db.execute(
+        update(OTPChallenge)
+        .where(
+            OTPChallenge.id == challenge.id,
+            OTPChallenge.attempts < 5,
+            OTPChallenge.verified_at.is_(None),
+            OTPChallenge.expires_at > now,
+        )
+        .values(verified_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP")
     user.is_verified = True
     db.commit()
     access_token, refresh_token = _create_token_pair(db, user)
@@ -282,6 +374,8 @@ def get_authenticated_user(db: Session, token: str) -> User:
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if payload.get("ver") != user.token_version:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token has been revoked")
     revoked = db.scalar(
         select(RevokedToken).where(
             RevokedToken.user_id == user.id,
@@ -319,15 +413,29 @@ def rotate_refresh_token(db: Session, refresh_token_value: str) -> dict[str, str
     user = db.get(User, current.user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    new_access = create_access_token(str(user.id), str(uuid.uuid4()))
+    if not user.is_active:
+        revoke_family_tokens(db, current.user_id, current.family_id)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
+    now = datetime.now(timezone.utc)
+    claimed = db.execute(
+        update(RefreshToken)
+        .where(
+            RefreshToken.id == current.id,
+            RefreshToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+    )
+    if claimed.rowcount != 1:
+        revoke_family_tokens(db, current.user_id, current.family_id)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has been revoked")
+    new_access = create_access_token(str(user.id), str(uuid.uuid4()), user.token_version)
     new_refresh = create_refresh_token(str(user.id), str(uuid.uuid4()))
-    current.revoked_at = datetime.now(timezone.utc)
     db.add(
         RefreshToken(
             user_id=user.id,
             token_hash=hash_token_value(new_refresh),
             family_id=current.family_id,
-            expires_at=datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days),
+            expires_at=now + timedelta(days=settings.refresh_token_expire_days),
         )
     )
     db.commit()

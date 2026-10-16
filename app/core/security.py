@@ -32,13 +32,14 @@ def generate_otp_code(length: int = 6) -> str:
     return "".join(secrets.choice("0123456789") for _ in range(length))
 
 
-def create_access_token(subject: str, jti: str) -> str:
+def create_access_token(subject: str, jti: str, token_version: int = 0) -> str:
     expires_delta = timedelta(minutes=settings.access_token_expire_minutes)
     expire = datetime.now(timezone.utc) + expires_delta
     payload = {
         "sub": subject,
         "type": "access",
         "jti": jti,
+        "ver": token_version,
         "exp": expire,
         "iat": datetime.now(timezone.utc),
     }

@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database.base import Base
 import app.database.session as db_session
+import app.core.rate_limit as rate_limiter
 import app.main as app_main
 from app.services import auth_service
 
@@ -19,6 +20,7 @@ from app.services import auth_service
 def client(monkeypatch):
     # Keep unit tests deterministic and independent of external SMTP credentials.
     monkeypatch.setattr(auth_service, "send_email", lambda *args, **kwargs: None)
+    monkeypatch.setattr(rate_limiter, "_rate_buckets", {})
     db_fd, db_path = tempfile.mkstemp(prefix="fastapi_auth_test_", suffix=".db", dir="/tmp")
     os.close(db_fd)
     os.unlink(db_path)
@@ -34,5 +36,6 @@ def client(monkeypatch):
     finally:
         Base.metadata.drop_all(bind=db_session.engine)
         db_session.SessionLocal().close()
+        db_session.engine.dispose()
         if os.path.exists(db_path):
             os.remove(db_path)

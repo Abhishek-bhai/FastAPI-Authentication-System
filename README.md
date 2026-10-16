@@ -7,6 +7,7 @@ A REST API built with FastAPI, SQLAlchemy and JWT authentication. It demonstrate
 - Password hashing and validated request schemas
 - Short-lived access tokens and rotating refresh tokens
 - Refresh-token reuse detection and logout revocation
+- Password resets invalidate previously issued access and refresh tokens
 - Protected profile and premium endpoints
 - Email verification and password-reset token flows
 - Email OTP with expiry and attempt limits
@@ -58,6 +59,8 @@ The application reads these environment variables from `.env` (or the process en
 | `CORS_ORIGINS` | Comma-separated allowed origins |
 | `RATE_LIMIT_PER_MINUTE`, `OTP_RATE_LIMIT_PER_MINUTE` | Request limits |
 
+Rate limits are enforced in process memory and are intended for a single application worker. Multi-worker or multi-instance deployments should use a shared rate-limit backend at the edge or in the application.
+
 Values in `.env.example` are placeholders, not working credentials. Configure real credentials only in your local `.env` or deployment secret store.
 `SECRET_KEY` is required; the application no longer falls back to a known development signing key.
 
@@ -86,7 +89,7 @@ In Swagger UI, use **Authorize** with the account email as the username and its 
 
 ## Email configuration
 
-Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM` in `.env`. Port 465 uses SMTP over SSL; other configured ports use STARTTLS. Verification-email delivery reports a service error when delivery fails. Password-reset and OTP requests intentionally return generic responses to avoid revealing whether an email belongs to an account; delivery failures are logged without including tokens, codes, or recipient addresses. Tests mock SMTP and do not send real email.
+Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM` in `.env`. Port 465 uses SMTP over SSL; other configured ports use STARTTLS. Registration reports a service error if the initial verification email cannot be delivered. Verification-email resend, password-reset, and OTP requests use generic responses to avoid revealing whether an email belongs to an account; delivery failures are logged without including tokens, codes, or recipient addresses. Tests mock SMTP and do not send real email.
 
 ## OAuth setup
 
@@ -126,7 +129,7 @@ For production, use HTTPS, set `APP_ENV=production`, `DEBUG=false`, a strong sec
 | POST | `/auth/logout` | Revoke tokens |
 | GET | `/auth/me` | Current authenticated profile |
 | GET | `/auth/premium` | Example protected resource |
-| POST | `/auth/request-verification` | Send verification email |
+| POST | `/auth/request-verification` | Request a verification email using `{"email": "..."}` |
 | POST | `/auth/verify-email` | Verify email token |
 | POST | `/auth/request-password-reset` | Request password reset |
 | POST | `/auth/reset-password` | Set password using reset token |

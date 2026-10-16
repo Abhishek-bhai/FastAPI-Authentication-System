@@ -5,8 +5,8 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 class UserCreate(BaseModel):
     email: EmailStr
-    username: str | None = None
-    password: str = Field(..., min_length=8)
+    username: str | None = Field(default=None, max_length=100)
+    password: str = Field(..., min_length=8, max_length=1024)
 
     @field_validator("password")
     @classmethod
@@ -18,7 +18,7 @@ class UserCreate(BaseModel):
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(..., max_length=1024)
 
 
 class RefreshRequest(BaseModel):
@@ -45,13 +45,17 @@ class EmailVerificationRequest(BaseModel):
     token: str
 
 
+class VerificationEmailRequest(BaseModel):
+    email: EmailStr
+
+
 class PasswordResetRequest(BaseModel):
     email: EmailStr
 
 
 class PasswordResetConfirmRequest(BaseModel):
     token: str
-    new_password: str = Field(..., min_length=8)
+    new_password: str = Field(..., min_length=8, max_length=1024)
 
 
 class OTPRequest(BaseModel):

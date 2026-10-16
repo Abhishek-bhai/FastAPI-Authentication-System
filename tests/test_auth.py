@@ -27,6 +27,7 @@ def test_registration_and_login(client: TestClient):
     )
     assert response.status_code == 201, response.text
 
+    verify_registered_user(client, "alice@example.com")
     login = client.post(
         "/auth/login",
         json={"email": "alice@example.com", "password": "strongpass123"},
@@ -47,6 +48,30 @@ def test_duplicate_registration(client: TestClient):
     assert duplicate.status_code == 409
 
 
+def test_password_login_requires_email_verification(client: TestClient):
+    email = "unverified@example.com"
+    client.post("/auth/register", json={"email": email, "username": "unverified", "password": "strongpass123"})
+
+    unverified_login = client.post("/auth/login", json={"email": email, "password": "strongpass123"})
+    assert unverified_login.status_code == 403
+    assert unverified_login.json() == {"detail": "Please verify your email before logging in"}
+
+    verify_registered_user(client, email)
+    verified_login = client.post("/auth/login", json={"email": email, "password": "strongpass123"})
+    assert verified_login.status_code == 200, verified_login.text
+
+
+def test_password_reset_request_is_rate_limited_per_email(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "otp_rate_limit_per_minute", 1)
+    email = "rate-limit@example.com"
+    first = client.post("/auth/request-password-reset", json={"email": email})
+    second = client.post("/auth/request-password-reset", json={"email": email})
+
+    assert first.status_code == 200
+    assert first.json() == {"message": "If that account exists, a password reset link has been sent."}
+    assert second.status_code == 429
+
+
 def test_protected_route_and_invalid_tokens(client: TestClient):
     openapi = client.get("/openapi.json").json()
     assert openapi["paths"]["/auth/me"]["get"]["security"] == [{"OAuth2PasswordBearer": []}]
@@ -61,6 +86,7 @@ def test_protected_route_and_invalid_tokens(client: TestClient):
     }
 
     client.post("/auth/register", json={"email": "carol@example.com", "username": "carol", "password": "strongpass123"})
+    verify_registered_user(client, "carol@example.com")
     login = client.post("/auth/login", json={"email": "carol@example.com", "password": "strongpass123"})
     access = login.json()["access_token"]
 
@@ -122,6 +148,7 @@ def test_access_token_with_non_numeric_subject_returns_unauthorized(client: Test
 
 def test_oauth2_form_login_and_protected_route(client: TestClient):
     client.post("/auth/register", json={"email": "oauth2@example.com", "username": "oauth2", "password": "strongpass123"})
+    verify_registered_user(client, "oauth2@example.com")
     token_response = client.post(
         "/auth/token",
         data={"username": "oauth2@example.com", "password": "strongpass123"},
@@ -134,6 +161,7 @@ def test_oauth2_form_login_and_protected_route(client: TestClient):
 
 def test_refresh_rotation_and_reuse_detection(client: TestClient):
     client.post("/auth/register", json={"email": "dave@example.com", "username": "dave", "password": "strongpass123"})
+    verify_registered_user(client, "dave@example.com")
     login = client.post("/auth/login", json={"email": "dave@example.com", "password": "strongpass123"})
     old_refresh = login.json()["refresh_token"]
 
@@ -148,8 +176,31 @@ def test_refresh_rotation_and_reuse_detection(client: TestClient):
     assert revoked_after_replay.status_code == 401
 
 
+def test_refresh_token_cannot_be_used_after_account_is_disabled(client: TestClient):
+    client.post("/auth/register", json={"email": "disabled-refresh@example.com", "username": "disabled-refresh", "password": "strongpass123"})
+    verify_registered_user(client, "disabled-refresh@example.com")
+    login = client.post(
+        "/auth/login",
+        json={"email": "disabled-refresh@example.com", "password": "strongpass123"},
+    )
+    from app.database.session import SessionLocal
+
+    db = SessionLocal()
+    user = db.query(User).filter_by(email="disabled-refresh@example.com").first()
+    user.is_active = False
+    db.commit()
+    db.close()
+
+    disabled_refresh = client.post("/auth/refresh", json={"refresh_token": login.json()["refresh_token"]})
+    assert disabled_refresh.status_code == 403
+
+    revoked_refresh = client.post("/auth/refresh", json={"refresh_token": login.json()["refresh_token"]})
+    assert revoked_refresh.status_code == 401
+
+
 def test_logout_revokes_refresh_token(client: TestClient):
     client.post("/auth/register", json={"email": "erin@example.com", "username": "erin", "password": "strongpass123"})
+    verify_registered_user(client, "erin@example.com")
     login = client.post("/auth/login", json={"email": "erin@example.com", "password": "strongpass123"})
     tokens = login.json()
     access = tokens["access_token"]
@@ -168,6 +219,8 @@ def test_logout_revokes_refresh_token(client: TestClient):
 def test_logout_cannot_revoke_another_users_refresh_token(client: TestClient):
     client.post("/auth/register", json={"email": "owner@example.com", "username": "owner", "password": "strongpass123"})
     client.post("/auth/register", json={"email": "other@example.com", "username": "other", "password": "strongpass123"})
+    verify_registered_user(client, "owner@example.com")
+    verify_registered_user(client, "other@example.com")
     owner_login = client.post("/auth/login", json={"email": "owner@example.com", "password": "strongpass123"})
     other_login = client.post("/auth/login", json={"email": "other@example.com", "password": "strongpass123"})
 
@@ -185,6 +238,20 @@ def test_logout_cannot_revoke_another_users_refresh_token(client: TestClient):
     assert other_refresh.status_code == 200, other_refresh.text
 
 
+def verify_registered_user(client: TestClient, email: str) -> None:
+    from app.database.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter_by(email=email).first()
+        assert user is not None
+        token = auth_service.request_verification_token(db, user)
+    finally:
+        db.close()
+    response = client.post("/auth/verify-email", json={"token": token})
+    assert response.status_code == 200, response.text
+
+
 def test_email_verification_flow(client: TestClient):
     client.post("/auth/register", json={"email": "frank@example.com", "username": "frank", "password": "strongpass123"})
     from app.database.session import SessionLocal
@@ -195,10 +262,52 @@ def test_email_verification_flow(client: TestClient):
 
     verify = client.post("/auth/verify-email", json={"token": token})
     assert verify.status_code == 200, verify.text
+    replay = client.post("/auth/verify-email", json={"token": token})
+    assert replay.status_code == 400
+
+
+def test_unverified_user_can_resend_verification_without_account_enumeration(
+    client: TestClient, monkeypatch
+):
+    email = "resend-verification@example.com"
+    registered = client.post(
+        "/auth/register",
+        json={"email": email, "username": "resend-verification", "password": "strongpass123"},
+    )
+    assert registered.status_code == 201
+
+    delivered_bodies: list[str] = []
+    monkeypatch.setattr(
+        auth_service,
+        "send_email",
+        lambda subject, recipient, body: delivered_bodies.append(body),
+    )
+    response = client.post("/auth/request-verification", json={"email": email})
+    unknown = client.post(
+        "/auth/request-verification",
+        json={"email": "unknown-verification@example.com"},
+    )
+
+    expected = {
+        "message": "If that account exists and needs verification, a verification email has been sent."
+    }
+    assert response.status_code == unknown.status_code == 200
+    assert response.json() == unknown.json() == expected
+    assert len(delivered_bodies) == 1
+    token = delivered_bodies[0].split("\n\n")[2]
+    assert token not in response.text
+
+    verified = client.post("/auth/verify-email", json={"token": token})
+    assert verified.status_code == 200, verified.text
+    client.post("/auth/request-verification", json={"email": email})
+    assert len(delivered_bodies) == 1
 
 
 def test_password_reset_flow(client: TestClient):
     client.post("/auth/register", json={"email": "gina@example.com", "username": "gina", "password": "strongpass123"})
+    verify_registered_user(client, "gina@example.com")
+    prior_login = client.post("/auth/login", json={"email": "gina@example.com", "password": "strongpass123"})
+    prior_tokens = prior_login.json()
     from app.database.session import SessionLocal
     db = SessionLocal()
     user = db.query(User).filter_by(email="gina@example.com").first()
@@ -207,6 +316,10 @@ def test_password_reset_flow(client: TestClient):
 
     reset = client.post("/auth/reset-password", json={"token": token, "new_password": "newStrongPass123"})
     assert reset.status_code == 200, reset.text
+    old_access = client.get("/auth/me", headers={"Authorization": f"Bearer {prior_tokens['access_token']}"})
+    assert old_access.status_code == 401
+    old_refresh = client.post("/auth/refresh", json={"refresh_token": prior_tokens["refresh_token"]})
+    assert old_refresh.status_code == 401
 
     login = client.post("/auth/login", json={"email": "gina@example.com", "password": "strongpass123"})
     assert login.status_code == 401
@@ -216,6 +329,35 @@ def test_password_reset_flow(client: TestClient):
 
     replay = client.post("/auth/reset-password", json={"token": token, "new_password": "anotherPass123"})
     assert replay.status_code == 400
+
+
+def test_password_reset_invalidates_other_outstanding_reset_tokens(client: TestClient):
+    client.post(
+        "/auth/register",
+        json={"email": "reset-multiple@example.com", "username": "reset-multiple", "password": "strongpass123"},
+    )
+    verify_registered_user(client, "reset-multiple@example.com")
+
+    from app.database.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        first_token = auth_service.request_password_reset(db, "reset-multiple@example.com")
+        second_token = auth_service.request_password_reset(db, "reset-multiple@example.com")
+    finally:
+        db.close()
+
+    reset = client.post(
+        "/auth/reset-password",
+        json={"token": second_token, "new_password": "newStrongPass123"},
+    )
+    assert reset.status_code == 200, reset.text
+
+    stale_reset = client.post(
+        "/auth/reset-password",
+        json={"token": first_token, "new_password": "anotherStrongPass123"},
+    )
+    assert stale_reset.status_code == 400
 
 
 def test_expired_password_reset_token_is_rejected(client: TestClient):
@@ -427,6 +569,8 @@ def test_oauth_login_rejects_placeholder_credentials(client: TestClient, monkeyp
 def test_unauthorized_access_to_another_user(client: TestClient):
     client.post("/auth/register", json={"email": "ivy@example.com", "username": "ivy", "password": "strongpass123"})
     client.post("/auth/register", json={"email": "jane@example.com", "username": "jane", "password": "strongpass123"})
+    verify_registered_user(client, "ivy@example.com")
+    verify_registered_user(client, "jane@example.com")
     login = client.post("/auth/login", json={"email": "ivy@example.com", "password": "strongpass123"})
     token = login.json()["access_token"]
     response = client.get("/auth/users/2", headers={"Authorization": f"Bearer {token}"})

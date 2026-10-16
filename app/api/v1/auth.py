@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_active_user, get_current_user
+from app.api.deps import get_current_active_user
 from app.core.config import settings
 from app.core.rate_limit import rate_limit
 from app.database.session import get_db
@@ -18,6 +18,7 @@ from app.schemas.auth import (
     EmailVerificationRequest, LoginRequest, MessageResponse, OTPRequest,
     OTPVerifyRequest, PasswordResetConfirmRequest, PasswordResetRequest,
     ProfileResponse, RefreshRequest, TokenPair, UserCreate, UserRead,
+    VerificationEmailRequest,
 )
 from app.services import auth_service, oauth_service
 
@@ -122,25 +123,43 @@ def premium(current_user: User = Depends(get_current_active_user)) -> dict[str, 
 
 
 @router.post("/request-verification", response_model=MessageResponse)
-def request_verification(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)) -> dict[str, str]:
-    auth_service.request_verification_token(db, current_user)
-    return {"message": "Verification email sent."}
+def request_verification(
+    payload: VerificationEmailRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    client_host = request.client.host if request.client else "unknown"
+    rate_limit(
+        f"request_verification:{client_host}",
+        settings.rate_limit_per_minute,
+    )
+    rate_limit(
+        f"request_verification_email:{payload.email.lower()}",
+        settings.otp_rate_limit_per_minute,
+    )
+    auth_service.request_verification_for_email(db, payload.email)
+    return {"message": "If that account exists and needs verification, a verification email has been sent."}
 
 
 @router.post("/verify-email", response_model=MessageResponse)
-def verify_email(payload: EmailVerificationRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+def verify_email(payload: EmailVerificationRequest, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    rate_limit(f"verify_email:{request.client.host if request.client else 'unknown'}", settings.rate_limit_per_minute)
     auth_service.verify_email_token(db, payload.token)
     return {"message": "Email verified successfully"}
 
 
 @router.post("/request-password-reset", response_model=MessageResponse)
-def request_password_reset(payload: PasswordResetRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+def request_password_reset(payload: PasswordResetRequest, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    client_host = request.client.host if request.client else "unknown"
+    rate_limit(f"password_reset_request:{client_host}", settings.rate_limit_per_minute)
+    rate_limit(f"password_reset_email:{payload.email.lower()}", settings.otp_rate_limit_per_minute)
     auth_service.request_password_reset(db, payload.email)
     return {"message": "If that account exists, a password reset link has been sent."}
 
 
 @router.post("/reset-password", response_model=MessageResponse)
-def reset_password(payload: PasswordResetConfirmRequest, db: Session = Depends(get_db)) -> dict[str, str]:
+def reset_password(payload: PasswordResetConfirmRequest, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    rate_limit(f"reset_password:{request.client.host if request.client else 'unknown'}", settings.rate_limit_per_minute)
     auth_service.reset_password(db, payload.token, payload.new_password)
     return {"message": "Password reset successfully"}
 
