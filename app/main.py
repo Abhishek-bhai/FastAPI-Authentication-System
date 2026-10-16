@@ -4,8 +4,6 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1.auth import router as auth_router
 from app.core.config import settings
-from app.database.base import Base
-from app.database.session import engine
 from app.services.email_service import EmailDeliveryError
 
 app = FastAPI(title=settings.app_name, version="1.0.0", docs_url="/docs")
@@ -34,8 +32,3 @@ app.include_router(auth_router)
 @app.get("/health")
 def health_check() -> dict[str, str]:
     return {"status": "ok"}
-
-
-@app.on_event("startup")
-def startup() -> None:
-    Base.metadata.create_all(bind=engine)

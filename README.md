@@ -42,6 +42,36 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 Set `SECRET_KEY` to that value. The default database is local SQLite. Never commit `.env` or real provider credentials.
 
+## Configuration
+
+The application reads these environment variables from `.env` (or the process environment):
+
+| Variable | Purpose |
+|---|---|
+| `APP_ENV`, `DEBUG` | Environment and debug mode |
+| `DATABASE_URL` | SQLAlchemy database URL; defaults to `sqlite:///./app.db` |
+| `SECRET_KEY`, `ALGORITHM` | JWT signing configuration |
+| `ACCESS_TOKEN_EXPIRE_MINUTES`, `REFRESH_TOKEN_EXPIRE_DAYS` | Token lifetimes |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | Email delivery |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Google OAuth |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_REDIRECT_URI` | GitHub OAuth |
+| `CORS_ORIGINS` | Comma-separated allowed origins |
+| `RATE_LIMIT_PER_MINUTE`, `OTP_RATE_LIMIT_PER_MINUTE` | Request limits |
+
+Values in `.env.example` are placeholders, not working credentials. Configure real credentials only in your local `.env` or deployment secret store.
+
+## Database migrations
+
+Apply migrations before starting the server:
+
+```bash
+python -m alembic upgrade head
+python -m alembic current
+python -m alembic check
+```
+
+The server does not create tables on startup; Alembic is the schema owner. For an existing database created outside Alembic, first back it up and verify that its tables, columns, indexes, constraints, and foreign keys match the migration. Only then record the matching revision with `python -m alembic stamp 20250217_initial_auth`; do not stamp an unverified database or run the initial upgrade against tables that already exist.
+
 ## Run
 
 ```bash
@@ -88,7 +118,7 @@ For production, use HTTPS, set `APP_ENV=production`, `DEBUG=false`, a strong sec
 ## Tests
 
 ```bash
-pytest -q
+python -m pytest -q
 pip check
 ```
 

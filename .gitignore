@@ -1,4 +1,6 @@
 .env
+.env.*
+!/.env.example
 .venv/
 __pycache__/
 *.py[cod]
@@ -8,7 +10,18 @@ __pycache__/
 htmlcov/
 app.db
 *.db
+*.db.backup-*
 *.sqlite3
 *.sqlite
+*.sqlite3-*
+*.sqlite-*
+*.db-*
 *.log
+*.pem
+*.key
+*.p12
+*.pfx
+*token*dump*
+tokens*.json
+tokens*.txt
 .DS_Store

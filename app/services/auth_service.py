@@ -196,10 +196,7 @@ def request_otp(db: Session, email: str) -> str:
     user = _get_user_by_email(db, email.lower().strip())
 
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
+        return "OTP sent."
 
     rate_limit(f"otp:{email}", settings.otp_rate_limit_per_minute)
 

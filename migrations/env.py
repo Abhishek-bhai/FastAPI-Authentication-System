@@ -12,6 +12,10 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+config.set_main_option(
+    "sqlalchemy.url",
+    app_engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+)
 
 
 def run_migrations_offline() -> None:

@@ -33,6 +33,13 @@ def test_duplicate_registration(client: TestClient):
 
 
 def test_protected_route_and_invalid_tokens(client: TestClient):
+    openapi = client.get("/openapi.json").json()
+    assert openapi["paths"]["/auth/me"]["get"]["security"] == [{"HTTPBearer": []}]
+    assert openapi["components"]["securitySchemes"]["HTTPBearer"] == {
+        "type": "http",
+        "scheme": "bearer",
+    }
+
     client.post("/auth/register", json={"email": "carol@example.com", "username": "carol", "password": "strongpass123"})
     login = client.post("/auth/login", json={"email": "carol@example.com", "password": "strongpass123"})
     access = login.json()["access_token"]
@@ -59,6 +66,8 @@ def test_refresh_rotation_and_reuse_detection(client: TestClient):
 
     replay = client.post("/auth/refresh", json={"refresh_token": old_refresh})
     assert replay.status_code == 401
+    revoked_after_replay = client.post("/auth/refresh", json={"refresh_token": new_refresh})
+    assert revoked_after_replay.status_code == 401
 
 
 def test_logout_revokes_refresh_token(client: TestClient):
@@ -70,6 +79,9 @@ def test_logout_revokes_refresh_token(client: TestClient):
 
     logout = client.post("/auth/logout", json={"refresh_token": refresh}, headers={"Authorization": f"Bearer {access}"})
     assert logout.status_code == 200, logout.text
+
+    revoked_access = client.get("/auth/me", headers={"Authorization": f"Bearer {access}"})
+    assert revoked_access.status_code == 401
 
     reuse = client.post("/auth/refresh", json={"refresh_token": refresh})
     assert reuse.status_code == 401
@@ -113,6 +125,12 @@ def test_otp_flow(client: TestClient):
     db.close()
     verify = client.post("/auth/otp/verify", json={"email": "henry@example.com", "code": code})
     assert verify.status_code == 200, verify.text
+
+
+def test_otp_request_does_not_disclose_unknown_email(client: TestClient):
+    response = client.post("/auth/otp/request", json={"email": "unknown@example.com"})
+    assert response.status_code == 200
+    assert response.json() == {"message": "OTP sent."}
 
 
 def test_oauth_state_validation(client: TestClient):
